@@ -1,0 +1,239 @@
+---
+title: "Boreal lakes metagenomes"
+author: "Domenico Simone"
+date: "Dec 7th, 2020"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, message = FALSE, warning = FALSE, echo=FALSE)
+library(tidyverse)
+library(tidyjson)
+library(here)
+library(DT)
+```
+
+```{r, eval=TRUE, echo=FALSE}
+report.dir <- here("reports")
+dir.create(report.dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r, eval=TRUE, echo=FALSE}
+# some useful functions
+#
+# DataTable is a wonderful package but oh boy,
+# saveWidget can't accept relative paths which is like
+# having a Ferrari fuelled with diesel
+
+saveWidgetFix <- function (widget, file, title="Table") {
+  ## A wrapper to saveWidget which compensates for arguable BUG in
+  ## saveWidget which requires `file` to be in current working
+  ## directory.
+  ## Source: https://github.com/ramnathv/htmlwidgets/issues/299#issuecomment-375058928
+  wd<-getwd()
+  on.exit(setwd(wd))
+  outDir<-dirname(file)
+  file<-basename(file)
+  setwd(outDir)
+  saveWidget(widget, file=file, title=title)
+}
+
+## functions to get data in place
+read_mOTU_data <- function(motu.out){
+    # motus <- tidyjson::read_json(here("2000_mOTU/Lainio/motu.out"), format = "json")
+    #
+    # this will get a table with
+    # - mOTU
+    # - bin
+    motus <- tidyjson::read_json(motu.out, format = "json") %>%
+        gather_object %>%
+        spread_all %>%
+        enter_object(genomes) %>%
+        gather_array %>%
+        spread_all %>% 
+        select(name, name.2) %>%
+        rename(mOTU=name, bin=name.2)
+}
+
+# sss <- read_mOTU_data("2000_mOTU/Lainio/motu.out")
+# head(sss)
+# rm(sss)
+
+read_magstats_checkm <- function(checkm.out){
+    # magstats <- read_csv(here(paste0("1500_coasses/", lake, "/assemblies/megahit/binning/metabat/magstats.csv"))) %>%
+    #
+    # output: a table with
+    # - bin
+    # - length
+    # - nb_contigs
+    # - nb_proteins
+    # - coding_density
+    # - GC
+    # - completeness
+    # - contamination
+    # - taxo:checkm
+    # - strain_heterogeneity
+    magstats <- read_csv(checkm.out) %>%
+      dplyr::rename("bin" = X1, "taxo_checkm" = "taxo:checkm")
+}
+
+# sss <- read_magstats_checkm(here(paste0("1500_coasses/", lake, "/assemblies/megahit/binning/metabat/magstats.csv")))
+# head(sss)
+# rm(sss)
+
+read_bin_abundance <- function(merged.htseq.out){
+    # tpm_data <- read_csv(here(paste0("1500_coasses/", lake, "/assemblies/megahit/binning/metabat/clean_bins/mapping/all.tpm"))) %>%
+    # 
+    # table: 
+    # - bin
+    # - sample
+    # - abundance
+    lake <- strsplit(merged.htseq.out, "1500_coasses/")[[1]][2]
+    # l <- strsplit(l, "1500_coasses/")[[1]][2]
+    lake <- strsplit(lake, "/")[[1]][1]
+    tpm_data <- read_csv(merged.htseq.out) %>%
+                  separate(contig, into = c("bin", NA), sep = ":", remove = FALSE) %>%
+                  mutate(bin = paste0(lake, "_megahit_metabat_", bin, sep = "")) %>%
+                  group_by(bin) %>%
+                  summarise(across(where(is.numeric), ~ sum(.x))) %>%
+                  ungroup() %>%
+                  gather("sample", "abundance", 2:ncol(.))
+}
+
+# sss <- read_bin_abundance(here(paste0("1500_coasses/", lake, "/assemblies/megahit/binning/metabat/clean_bins/mapping/all.tpm")))
+# head(sss)
+# rm(sss)
+```
+
+```{r}
+## Read metadata
+metadata <- read_delim(here("metadata.tsv"), delim = "\t") %>%
+  select(-matches("possible"))
+```
+
+
+```{r eval=TRUE}
+overall_magstats_reloaded <- function(lake = "", completeness = 40, contamination = 5){
+    # print(paste(completeness, contamination))
+    # tpm_data <- read_csv(here(paste0("1500_coasses/", lake, "/assemblies/megahit/binning/metabat/clean_bins/mapping/all.tpm"))) %>%
+    #               separate(contig, into = c("bin", NA), sep = ":", remove = FALSE) %>%
+    #               mutate(bin = paste0(lake, "_megahit_metabat_", bin, sep = "")) %>%
+    #               group_by(bin) %>%
+    #               summarise(across(where(is.numeric), ~ sum(.x))) %>%
+    #               ungroup() %>%
+    #               gather("sample", "abundance", 2:ncol(.))
+    #print(lake)
+    tpm_data <- read_bin_abundance(here(paste0("1500_coasses/", lake, "/assemblies/megahit/binning/metabat/clean_bins/mapping/all.tpm")))
+    # print(head(tpm_data))
+    # magstats <- read_csv(here(paste0("1500_coasses/", lake, "/assemblies/megahit/binning/metabat/magstats.csv"))) %>%
+    #   dplyr::rename("bin" = X1)
+    magstats <- read_magstats_checkm(here(paste0("1500_coasses/", lake, "/assemblies/megahit/binning/metabat/magstats.csv")))    
+    # print(head(magstats))
+    final <- tpm_data %>%
+      left_join(magstats) %>%
+      filter(completeness >= !!completeness & contamination <= !!contamination) %>%
+      group_by(sample) %>%
+      summarise(total_binned = round(sum(abundance) / 10000, digits=2), n_bins = n_distinct(bin)) %>% ungroup() %>%
+      left_join(metadata)
+}
+
+lakes <- unique(metadata$lake)
+mag_stats_table <- lapply(lakes, overall_magstats_reloaded, completeness = 40, contamination = 5) %>% 
+                      bind_rows() %>%
+                      select(-ideal_name) %>%
+                      select(-seqId) %>%
+                      select(-Run)
+
+mag_stats_table_DT <- mag_stats_table %>%
+                        datatable(filter = "top", options = list(autoWidth=TRUE, initComplete = JS(
+                          "function(settings, json) {",
+                          "$('body').css({'font-family': 'Arial'});",
+                          "}"
+                          )
+                        ))
+
+mag_stats_table_DT %>%
+  saveWidgetFix(file = "mag_stats_table.html", title = "Boreal lakes: MAG statistics")
+
+# mag_stats_table_DT
+```
+
+## How much have we binned in non-clustered bins and clustered bins (mOTUs)?
+
+Bins were obtained by coassembling samples from the same lake, then using mappings from coassembled samples.
+
+After binning, we apply the mOTUlizer pipeline (https://github.com/moritzbuck/mOTUlizer) to cluster bins from different coassemblies of the same geographical area (Lainio, Uppsala, Orebro).
+
+```{r}
+overall_magstats_area <- function(area, metadata){
+    ## get all magstats (checkm outputs) 
+    # get lakes relevant to area of interest
+    lakes <- metadata %>% 
+                    filter(geographic_area == !!area) %>%
+                    select(lake) %>%
+                    distinct %>%
+                    pull(lake)
+    # get magstats files for those lakes
+    all_magstats_files <- Sys.glob(here("1500_coasses/*/assemblies/megahit/binning/metabat/magstats.csv"))
+    area_lakes_magstats_files <- all_magstats_files[grep(paste(lakes, collapse = "|"), all_magstats_files)]
+    # get magstats!
+    magstats <- do.call(rbind,lapply(area_lakes_magstats_files, read_magstats_checkm))# %>%
+                    # dplyr::rename("bin" = X1)
+    ## get all counts data
+    all_tpm_files <- Sys.glob(here("1500_coasses/*/assemblies/megahit/binning/metabat/clean_bins/mapping/all.tpm"))
+    area_lakes_tpm_files <- all_tpm_files[grep(paste(lakes, collapse = "|"), all_tpm_files)]
+    tpm_data_lakes <- do.call(rbind, lapply(area_lakes_tpm_files, read_bin_abundance))
+    ## parse mOTU assignments
+    mOTU <- read_mOTU_data(here(paste0("2000_mOTU/", area, "/motu.out")))
+    ## join counts with magstats
+    mOTU %>%
+      left_join(magstats) %>%
+      left_join(tpm_data_lakes)
+    # magstats %>%
+    #   left_join(magstats)
+}
+
+areas <- unique(metadata$geographic_area)
+mOTU_stats <- do.call(rbind, lapply(areas, overall_magstats_area, metadata=metadata))
+
+mOTU_stats.2 <- mOTU_stats %>%
+    group_by(mOTU) %>%
+    summarise(max_length = max(length)) %>% ungroup() %>%
+    left_join(mOTU_stats) %>%
+    separate(bin, into = c("lake", NA), sep = "_megahit", remove = FALSE) %>%
+    group_by(mOTU, max_length, lake, sample, taxo_checkm) %>%
+    summarise(total_abundance = sum(abundance),
+              taxa = paste(sort(unique(taxo_checkm)), collapse = ",")) %>% ungroup() %>% #head()
+    group_by(sample) %>%
+    summarise(total_binned_mOTU=round(sum(total_abundance) / 10^4), digits=2) %>% ungroup() %>%
+    left_join(mag_stats_table %>% select(sample, total_binned, n_bins, lake, geographic_area)) %>%
+    select(sample, lake, geographic_area, n_bins, total_binned, total_binned_mOTU) %>%
+    mutate(increase_in_binning=total_binned_mOTU-total_binned)
+
+mOTU_stats_DT <- mOTU_stats.2 %>%
+                        datatable(filter = "top", 
+                                  options = list(autoWidth=TRUE, initComplete = JS(
+                                                      "function(settings, json) {",
+                                                      "$('body').css({'font-family': 'Arial'});",
+                                                      "}"
+                                                      )),
+                                   caption = htmltools::tags$caption(
+                                              style = 'caption-side: top;
+                                                       text-align: Left;
+                                                       margin: 10px 10px 10px 10px',
+                                              "Summary of % binned reads (for each sample) in 
+                                              non-clustered bins (total_binned) and clustered bins (total_binned_mOTU).")
+                                  )
+
+mOTU_stats_DT %>%
+  saveWidgetFix(file = paste(report.dir, "motu_mag_stats_table.html", sep = "/"), title = "Boreal lakes: mOTU/MAG statistics")
+
+mOTU_stats_DT
+
+```
+
+After clustering, the mean proportion of reads mapping onto mOTUs is `r round(mean(mOTU_stats.2$total_binned_mOTU), digits=2)`%. Bin clustering in mOTUs has increased the proportion of reads recruited onto bins by `r round(mean(mOTU_stats.2$increase_in_binning), digits=2)`%.
+
